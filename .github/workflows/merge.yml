@@ -1,0 +1,79 @@
+# .github/workflows/tag-on-merge.yml
+name: Tag on Merge
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [production]
+
+permissions:
+  contents: write
+
+jobs:
+  create_tag:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout production (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: production
+
+      - name: Compute VERSION, TARGET_SHA, TAG
+        id: compute
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TITLE="${{ github.event.pull_request.title }}"
+          if [[ "$TITLE" =~ ^(v[0-9]+\.[0-9]+\.[0-9]+)#.+$ ]]; then
+            VERSION="${BASH_REMATCH[1]}"
+          else
+            echo "::error title=Invalid PR title::Require vMAJOR.MINOR.PATCH#ticket (e.g., v1.2.3#ABC-123)"
+            exit 1
+          fi
+
+          TARGET_SHA="${{ github.event.pull_request.merge_commit_sha }}"
+          if [ -z "$TARGET_SHA" ]; then
+            # Fallback: use remote-tracking head of production
+            git fetch --no-tags origin +refs/heads/production:refs/remotes/origin/production
+            TARGET_SHA="$(git rev-parse refs/remotes/origin/production)"
+          fi
+
+          SHORT_SHA="$(echo "$TARGET_SHA" | cut -c1-7)"
+          TAG="${VERSION}-$(TZ=Asia/Tokyo date +%Y%m%d)-${SHORT_SHA}"
+
+          {
+            echo "VERSION=$VERSION"
+            echo "TARGET_SHA=$TARGET_SHA"
+            echo "TAG=$TAG"
+          } >> "$GITHUB_ENV"
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure target commit exists locally (fetch if missing)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! git cat-file -e "${TARGET_SHA}^{commit}" 2>/dev/null; then
+            git fetch --no-tags origin "${TARGET_SHA}"
+          fi
+          git cat-file -e "${TARGET_SHA}^{commit}"
+
+      - name: Create and push tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${TAG:?TAG is required}"
+          : "${TARGET_SHA:?TARGET_SHA is required}"
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "::notice title=Tag already exists::$TAG already exists. Skipping creation."
+          else
+            git tag -a "$TAG" -m "Tag $TAG" "$TARGET_SHA"
+            git push origin "$TAG"
+          fi
