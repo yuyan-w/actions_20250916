@@ -1,37 +1,70 @@
 # .github/workflows/pipeline.yml
-name: Pipeline (on Tag or Manual)
+name: Pipeline (Tag only; guarded by production branch)
 
 on:
   push:
     tags:
-      - "v*"
+      - "v*" # リリースタグのみ
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to use (e.g., v1.2.3-20250916-abcdef0)"
-        required: false
+        description: "Tag to use (e.g., v1.2.3-20250916-abcdefg)"
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  RELEASE_BRANCH: production
 
 jobs:
   show-tag:
     runs-on: ubuntu-latest
     steps:
-      - name: Determine tag
+      - name: Checkout (fetch full history for ancestry checks)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine TAG and TARGET_SHA
         id: det
         shell: bash
         run: |
+          set -euo pipefail
+
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             TAG="${{ inputs.tag }}"
-            if [ -z "${TAG:-}" ]; then
-              echo "::error::Please provide the tag input for manual run."
-              exit 1
-            fi
           else
             TAG="${GITHUB_REF#refs/tags/}"
           fi
+
+          # 形式チェック：vMAJOR.MINOR.PATCH-YYYYMMDD-abcdefg (7桁)
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-[0-9]{8}-[0-9a-f]{7}$ ]]; then
+            echo "::error title=Invalid tag format::Expected vMAJOR.MINOR.PATCH-YYYYMMDD-abcdefg7, got: $TAG"
+            exit 1
+          fi
+
+          # タグの指すコミットSHA
+          TARGET_SHA="$(git rev-parse "${TAG}^{commit}")"
+
           echo "TAG=$TAG" >> "$GITHUB_ENV"
+          echo "TARGET_SHA=$TARGET_SHA" >> "$GITHUB_ENV"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "target_sha=$TARGET_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure TAG commit is on the designated branch (${{ env.RELEASE_BRANCH }})
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin "${RELEASE_BRANCH}:${RELEASE_BRANCH}"
+          if git merge-base --is-ancestor "$TARGET_SHA" "$RELEASE_BRANCH"; then
+            echo "OK: $TAG points to a commit reachable from branch '${RELEASE_BRANCH}'."
+          else
+            echo "::error title=Tag not on branch::Tag '$TAG' (commit $TARGET_SHA) is not an ancestor of '${RELEASE_BRANCH}'."
+            exit 1
+          fi
 
       - name: Print (behaviour check)
         shell: bash
         run: |
-          echo "Pipeline would run for tag: $TAG"
+          echo "Pipeline would run for tag: $TAG (commit: $TARGET_SHA) on branch: ${RELEASE_BRANCH}"
