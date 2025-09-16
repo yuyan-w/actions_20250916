@@ -11,10 +11,12 @@ permissions:
   contents: write
 
 jobs:
+  # 1) PRタイトルから vX.Y.Z を取り出し、完全版タグ vX.Y.Z-YYYYMMDD-abcdefg を作る
   resolve-version:
     runs-on: ubuntu-latest
     outputs:
       tag_name: ${{ steps.compose.outputs.tag_name }}
+      core_version: ${{ steps.ver.outputs.core }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -70,22 +72,28 @@ jobs:
           fi
           echo "tag_name=$TAG" >> "$GITHUB_OUTPUT"
 
-  deploy:
+  # 2) タグ付け専用ジョブ（冪等）：タグを作成/検証し、vX.Y.Z と完全版タグを後続へ渡す
+  tag-and-export:
     needs:
       - resolve-version
     runs-on: ubuntu-latest
+    outputs:
+      tag_name: ${{ steps.out.outputs.tag_name }}
+      core_version: ${{ steps.out.outputs.core_version }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - name: Verify/create tag idempotently
+        id: tag
         env:
           TAG: ${{ needs.resolve-version.outputs.tag_name }}
+          CORE: ${{ needs.resolve-version.outputs.core_version }}
         run: |
           set -euo pipefail
-          if [ -z "${TAG:-}" ]; then
-            echo "::error::Empty TAG from needs.resolve-version.outputs.tag_name"
+          if [ -z "${TAG:-}" ] || [ -z "${CORE:-}" ]; then
+            echo "::error::Missing TAG or CORE from previous job"
             exit 1
           fi
 
@@ -106,10 +114,29 @@ jobs:
             git push origin "$TAG"
           fi
 
-      - name: Deploy using version
+      - name: Export outputs for downstream jobs
+        id: out
         env:
-          VERSION: ${{ needs.resolve-version.outputs.tag_name }}
+          TAG: ${{ needs.resolve-version.outputs.tag_name }}
+          CORE: ${{ needs.resolve-version.outputs.core_version }}
         run: |
           set -euo pipefail
-          echo "Deploying $VERSION ..."
-          # 実デプロイ処理
+          echo "tag_name=$TAG" >> "$GITHUB_OUTPUT"
+          echo "core_version=$CORE" >> "$GITHUB_OUTPUT"
+
+  # 3) 実デプロイ側：タグを取得して出力のみ（ここを本番デプロイ処理に差し替えてもよい）
+  deploy:
+    needs:
+      - tag-and-export
+    runs-on: ubuntu-latest
+    steps:
+      - name: Show resolved versions
+        env:
+          TAG: ${{ needs.tag-and-export.outputs.tag_name }}
+          CORE: ${{ needs.tag-and-export.outputs.core_version }}
+        run: |
+          set -euo pipefail
+          echo "Resolved CORE version: $CORE"
+          echo "Resolved FULL tag    : $TAG"
+          # ↓ 実デプロイするなら、ここで $TAG / $CORE を使って処理を行う
+          # echo "Deploying $TAG ..."
