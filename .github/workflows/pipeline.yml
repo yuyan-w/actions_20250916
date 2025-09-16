@@ -1,10 +1,14 @@
-# .github/workflows/pipeline.yml
-name: Pipeline (Tag or Manual)
+name: Pipeline (via workflow_run / tag / manual)
 
 on:
+  # A) 連鎖トリガー（GITHUB_TOKENの制限を回避）
+  workflow_run:
+    workflows: ["Tag on Merge (and Manual)"]
+    types: [completed]
+  # B) 人手のタグpushでも動く
   push:
-    tags:
-      - "v*" # リリースタグのみ
+    tags: ["v*"]
+  # C) 手動（inputsは任意、無ければ失敗）
   workflow_dispatch:
     inputs:
       tag:
@@ -13,52 +17,63 @@ on:
 
 permissions:
   contents: read
+  actions: read # 他ワークフローのartifactをrun-id指定で取得するため必須
 
 env:
   RELEASE_BRANCH: production
 
 jobs:
   show-tag:
+    if: >
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+      || github.event_name == 'push'
+      || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      # workflow_run 経路：直前WFの artifact からタグ名を取得
+      - name: Download tag artifact from previous workflow run
+        if: ${{ github.event_name == 'workflow_run' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: created-tag
+          path: .
+          run-id: ${{ github.event.workflow_run.id }}
 
       - name: Determine TAG and TARGET_SHA
         id: det
         shell: bash
         run: |
           set -euo pipefail
-          EVENT="${{ github.event_name }}"
+          case "${{ github.event_name }}" in
+            workflow_run)
+              if [ -f release-tag.txt ]; then TAG="$(cat release-tag.txt)"; fi
+              ;;
+            push)
+              if [[ "${GITHUB_REF}" == refs/tags/* ]]; then TAG="${GITHUB_REF#refs/tags/}"; fi
+              ;;
+            workflow_dispatch)
+              if [ -n "${{ inputs.tag }}" ]; then TAG="${{ inputs.tag }}"; fi
+              ;;
+          esac
 
-          if [ "$EVENT" = "workflow_dispatch" ]; then
-            if [ -n "${{ inputs.tag }}" ]; then
-              TAG="${{ inputs.tag }}"
-            else
-              echo "::error title=No tag provided::Manual run requires 'inputs.tag'."
-              exit 1
-            fi
-          elif [[ "$GITHUB_REF" == refs/tags/* ]]; then
-            TAG="${GITHUB_REF#refs/tags/}"
-          else
-            echo "::error title=No tag found::This workflow requires a tag push or a manual input."
+          if [ -z "${TAG:-}" ]; then
+            echo "::error title=No tag found::Need a tag (from previous workflow, tag push, or manual input)."
             exit 1
           fi
 
-          # タグ形式チェック
+          # 形式チェック vMAJOR.MINOR.PATCH-YYYYMMDD-abcdefg(7)
           if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-[0-9]{8}-[0-9a-f]{7}$ ]]; then
-            echo "::error title=Invalid tag format::Expected vMAJOR.MINOR.PATCH-YYYYMMDD-abcdefg7, got: $TAG"
+            echo "::error title=Invalid tag format::Expected vX.Y.Z-YYYYMMDD-abcdefg7, got: $TAG"
             exit 1
           fi
 
           TARGET_SHA="$(git rev-list -n1 "$TAG")"
-
-          echo "TAG=$TAG" >> "$GITHUB_ENV"
-          echo "TARGET_SHA=$TARGET_SHA" >> "$GITHUB_ENV"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "target_sha=$TARGET_SHA" >> "$GITHUB_OUTPUT"
+          echo "TAG=$TAG" >> $GITHUB_ENV
+          echo "TARGET_SHA=$TARGET_SHA" >> $GITHUB_ENV
 
       - name: Ensure tag commit is on ${{ env.RELEASE_BRANCH }}
         shell: bash
@@ -68,10 +83,11 @@ jobs:
           if git merge-base --is-ancestor "$TARGET_SHA" "$RELEASE_BRANCH"; then
             echo "OK: $TAG points to commit on branch '${RELEASE_BRANCH}'."
           else
-            echo "::error title=Tag not on branch::Tag '$TAG' (commit $TARGET_SHA) is not reachable from '${RELEASE_BRANCH}'."
+            echo "::error title=Tag not on branch::'$TAG' (commit $TARGET_SHA) is not reachable from '${RELEASE_BRANCH}'."
             exit 1
           fi
 
       - name: Print (behaviour check)
+        shell: bash
         run: |
           echo "Pipeline would run for tag: $TAG (commit: $TARGET_SHA) on branch: ${RELEASE_BRANCH}"
