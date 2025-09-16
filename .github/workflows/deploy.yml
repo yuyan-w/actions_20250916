@@ -1,77 +1,107 @@
 # .github/workflows/deploy.yml
 name: Deploy on merge
+
 on:
   push:
-    branches: [production] # or production
+    branches:
+      - production
   workflow_dispatch: {}
 
 permissions:
   contents: write
+
 jobs:
   resolve-version:
     runs-on: ubuntu-latest
+    outputs:
+      tag_name: ${{ steps.compose.outputs.tag_name }}
     steps:
       - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
+        with:
+          fetch-depth: 0
+
       - name: Get merged PR for this commit
         id: pr
         env:
           SHA: ${{ github.sha }}
           GH_TOKEN: ${{ github.token }}
         run: |
-          # このコミットに紐づくPRを取得（複数返る可能性があるが通常1件）
-          PR_JSON="$(gh api \
-            -H 'Accept: application/vnd.github.groot-preview+json' \
-            /repos/${{ github.repository }}/commits/$SHA/pulls)"
+          set -euo pipefail
+          PR_JSON="$(gh api /repos/${{ github.repository }}/commits/$SHA/pulls)"
           PR_NUMBER="$(echo "$PR_JSON" | jq -r '.[0].number')"
+          if [ -z "${PR_NUMBER}" ] || [ "${PR_NUMBER}" = "null" ]; then
+            echo "::error title=PR not found::No PR associated with $SHA"
+            exit 1
+          fi
           echo "pr=$PR_NUMBER" >> "$GITHUB_OUTPUT"
 
-      - name: Extract vX.Y.Z from PR title
+      - name: "Extract vX.Y.Z from PR title (format: v1.2.3#NNN)" # ← name をクォート
         id: ver
         env:
-          PR: ${{ steps.pr.outputs.pr }}
-          GH_TOKEN: ${{ github.token }}
+          PR: "${{ steps.pr.outputs.pr }}" # ← 式は文字列としてクォート
+          GH_TOKEN: "${{ github.token }}"
         run: |
+          set -euo pipefail
           TITLE="$(gh api /repos/${{ github.repository }}/pulls/$PR --jq '.title')"
-          # 例: "[release v1.2.3] 〇〇の改修"
-          if [[ "$TITLE" =~ v([0-9]+\.[0-9]+\.[0-9]+) ]]; then
-            CORE="v${BASH_REMATCH[1]}"
+          if [[ "$TITLE" =~ ^(v[0-9]+\.[0-9]+\.[0-9]+)\#.+$ ]]; then
+            CORE="${BASH_REMATCH[1]}"
             echo "core=$CORE" >> "$GITHUB_OUTPUT"
           else
-            echo "::error title=Version not found::PR title must include vX.Y.Z. title=$TITLE"
+            echo "::error title=Version not found::PR title must be 'vMAJOR.MINOR.PATCH#ticket'. title=$TITLE"
             exit 1
           fi
 
       - name: Compose full tag (Tokyo time)
-        id: tag
+        id: compose
+        env:
+          CORE: ${{ steps.ver.outputs.core }}
         run: |
-          CORE="${{ steps.ver.outputs.core }}"
+          set -euo pipefail
+          if [ -z "${CORE:-}" ]; then
+            echo "::error::Missing core version from previous step"
+            exit 1
+          fi
           DATE="$(TZ=Asia/Tokyo date +%Y%m%d)"
           SHORT="$(git rev-parse --short=7 ${{ github.sha }})"
           TAG="${CORE}-${DATE}-${SHORT}"
-          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-[0-9]{8}-[0-9a-f]{7}$ ]] || {
-            echo "::error::Invalid tag format $TAG"; exit 1; }
-          echo "name=$TAG" >> "$GITHUB_OUTPUT"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-[0-9]{8}-[0-9a-f]{7}$ ]]; then
+            echo "::error::Invalid tag format $TAG"
+            exit 1
+          fi
+          echo "tag_name=$TAG" >> "$GITHUB_OUTPUT"
 
   deploy:
-    needs: [resolve-version]
+    needs:
+      - resolve-version
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
+        with:
+          fetch-depth: 0
+
       - name: Verify tag uniqueness and create tag
         env:
-          TAG: ${{ needs.resolve-version.outputs.name }}
+          TAG: ${{ needs.resolve-version.outputs.tag_name }}
         run: |
-          if git rev-parse "$TAG" >/dev/null 2>&1; then
-            echo "::error::Tag $TAG already exists"; exit 1;
+          set -euo pipefail
+          if [ -z "${TAG:-}" ]; then
+            echo "::error::Empty TAG from needs.resolve-version.outputs.tag_name"
+            exit 1
           fi
-          git tag "$TAG" ${{ github.sha }}
+          git fetch --tags
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "::error::Tag $TAG already exists"
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "Tag $TAG" "${GITHUB_SHA}"
           git push origin "$TAG"
 
       - name: Deploy using version
         env:
-          VERSION: ${{ needs.resolve-version.outputs.name }}
+          VERSION: ${{ needs.resolve-version.outputs.tag_name }}
         run: |
+          set -euo pipefail
           echo "Deploying $VERSION ..."
-          # ここで実デプロイ処理
+          # 実デプロイ処理
