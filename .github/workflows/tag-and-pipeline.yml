@@ -15,46 +15,86 @@ on:
         required: false
 
 permissions:
-  contents: write # タグをpushするため
-  actions: read # （任意）後続のartifact参照に影響しないが慣例で付与
+  contents: write
 
 jobs:
   create-tag:
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-        with: { fetch-depth: 0, ref: production }
+      - name: Checkout production (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: production
 
-      - name: Compute TAG
+      - name: Compute TAG and TARGET_SHA
         id: compute
         shell: bash
         run: |
           set -euo pipefail
+
+          # Ensure we can resolve remote/branch refs reliably
+          git fetch --no-tags origin +refs/heads/*:refs/remotes/origin/*
+
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            VERSION="${{ inputs.version }}"
-            if [ -z "${VERSION:-}" ]; then
-              echo "::error title=Missing version::Provide inputs.version (e.g. v1.2.3)"; exit 1; fi
-            TARGET_SHA="${{ inputs.sha }}"
-            if [ -z "${TARGET_SHA:-}" ]; then TARGET_SHA="$(git rev-parse origin/production)"; fi
+            VERSION="${{ inputs.version || '' }}"
+            TARGET_SHA_INPUT="${{ inputs.sha || '' }}"
+
+            if [ -z "$VERSION" ]; then
+              echo "::error title=Missing version::Provide inputs.version (e.g. v1.2.3)"
+              exit 1
+            fi
+
+            if [ -z "$TARGET_SHA_INPUT" ]; then
+              # Default to the tip of production
+              TARGET_SHA="$(git rev-parse origin/production)"
+            else
+              TARGET_SHA="$TARGET_SHA_INPUT"
+            fi
           else
             TITLE="${{ github.event.pull_request.title }}"
-            [[ "$TITLE" =~ ^(v[0-9]+\.[0-9]+\.[0-9]+)#.+$ ]] || { echo "::error::PR title must be vX.Y.Z#xxx"; exit 1; }
-            VERSION="${BASH_REMATCH[1]}"
+            if [[ "$TITLE" =~ ^(v[0-9]+\.[0-9]+\.[0-9]+)#.+$ ]]; then
+              VERSION="${BASH_REMATCH[1]}"
+            else
+              echo "::error title=Invalid PR title::Expected vMAJOR.MINOR.PATCH#ticket, got: $TITLE"
+              exit 1
+            fi
+            # Use the merge commit SHA provided by the event
             TARGET_SHA="${{ github.event.pull_request.merge_commit_sha }}"
           fi
+
           SHORT_SHA="$(echo "$TARGET_SHA" | cut -c1-7)"
           TAG="${VERSION}-$(TZ=Asia/Tokyo date +%Y%m%d)-${SHORT_SHA}"
-          echo "TAG=$TAG" >> $GITHUB_ENV
+
+          # Export to subsequent steps
+          {
+            echo "TAG=$TAG"
+            echo "TARGET_SHA=$TARGET_SHA"
+          } >> "$GITHUB_ENV"
+
+          # Persist the tag for downstream workflow_run pipeline
           echo "$TAG" > release-tag.txt
+
+          # Display (for logs)
+          echo "VERSION=$VERSION"
+          echo "TARGET_SHA=$TARGET_SHA"
+          echo "TAG=$TAG"
 
       - name: Create and push tag
         shell: bash
         run: |
           set -euo pipefail
+          : "${TAG:?TAG is required}"
+          : "${TARGET_SHA:?TARGET_SHA is required}"
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "$TAG" -m "Tag $TAG" "$TARGET_SHA"
+
+          # Make sure the target commit exists locally
+          git fetch --no-tags --depth=0 origin +refs/heads/*:refs/remotes/origin/*
+
+          git tag -a "$TAG" -m "Tag $TAG from $TARGET_SHA" "$TARGET_SHA"
           git push origin "$TAG"
 
       - name: Upload tag artifact
