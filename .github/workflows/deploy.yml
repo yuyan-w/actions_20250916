@@ -1,0 +1,38 @@
+# .github/workflows/show-tag.yml
+name: Show Tag
+
+on:
+  push:
+    branches: [production]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  show_tag:
+    runs-on: ubuntu-latest
+    env:
+      TZ: Asia/Tokyo
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get latest tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 最新の v* タグを取得（作成日時の新しい順）
+          LATEST_TAG=$(git for-each-ref --sort=-creatordate --format='%(refname:short)' refs/tags/v* | head -n1)
+
+          if [ -z "$LATEST_TAG" ]; then
+            echo "::notice title=No tag found::No v* tag exists in this repo."
+            exit 0
+          fi
+
+          TARGET_SHA=$(git rev-list -n1 "$LATEST_TAG")
+
+          echo "Latest tag:    $LATEST_TAG"
+          echo "Target commit: $TARGET_SHA"
