@@ -1,38 +1,77 @@
-# .github/workflows/show-tag.yml
-name: Show Tag
-
+# .github/workflows/deploy.yml
+name: Deploy on merge
 on:
   push:
-    branches: [production]
+    branches: [production] # or production
   workflow_dispatch: {}
 
 permissions:
-  contents: read
-
+  contents: write
 jobs:
-  show_tag:
+  resolve-version:
     runs-on: ubuntu-latest
-    env:
-      TZ: Asia/Tokyo
     steps:
-      - name: Checkout full history
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Get latest tag
-        shell: bash
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Get merged PR for this commit
+        id: pr
+        env:
+          SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
-          # 最新の v* タグを取得（作成日時の新しい順）
-          LATEST_TAG=$(git for-each-ref --sort=-creatordate --format='%(refname:short)' refs/tags/v* | head -n1)
+          # このコミットに紐づくPRを取得（複数返る可能性があるが通常1件）
+          PR_JSON="$(gh api \
+            -H 'Accept: application/vnd.github.groot-preview+json' \
+            /repos/${{ github.repository }}/commits/$SHA/pulls)"
+          PR_NUMBER="$(echo "$PR_JSON" | jq -r '.[0].number')"
+          echo "pr=$PR_NUMBER" >> "$GITHUB_OUTPUT"
 
-          if [ -z "$LATEST_TAG" ]; then
-            echo "::notice title=No tag found::No v* tag exists in this repo."
-            exit 0
+      - name: Extract vX.Y.Z from PR title
+        id: ver
+        env:
+          PR: ${{ steps.pr.outputs.pr }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TITLE="$(gh api /repos/${{ github.repository }}/pulls/$PR --jq '.title')"
+          # 例: "[release v1.2.3] 〇〇の改修"
+          if [[ "$TITLE" =~ v([0-9]+\.[0-9]+\.[0-9]+) ]]; then
+            CORE="v${BASH_REMATCH[1]}"
+            echo "core=$CORE" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error title=Version not found::PR title must include vX.Y.Z. title=$TITLE"
+            exit 1
           fi
 
-          TARGET_SHA=$(git rev-list -n1 "$LATEST_TAG")
+      - name: Compose full tag (Tokyo time)
+        id: tag
+        run: |
+          CORE="${{ steps.ver.outputs.core }}"
+          DATE="$(TZ=Asia/Tokyo date +%Y%m%d)"
+          SHORT="$(git rev-parse --short=7 ${{ github.sha }})"
+          TAG="${CORE}-${DATE}-${SHORT}"
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-[0-9]{8}-[0-9a-f]{7}$ ]] || {
+            echo "::error::Invalid tag format $TAG"; exit 1; }
+          echo "name=$TAG" >> "$GITHUB_OUTPUT"
 
-          echo "Latest tag:    $LATEST_TAG"
-          echo "Target commit: $TARGET_SHA"
+  deploy:
+    needs: [resolve-version]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Verify tag uniqueness and create tag
+        env:
+          TAG: ${{ needs.resolve-version.outputs.name }}
+        run: |
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "::error::Tag $TAG already exists"; exit 1;
+          fi
+          git tag "$TAG" ${{ github.sha }}
+          git push origin "$TAG"
+
+      - name: Deploy using version
+        env:
+          VERSION: ${{ needs.resolve-version.outputs.name }}
+        run: |
+          echo "Deploying $VERSION ..."
+          # ここで実デプロイ処理
