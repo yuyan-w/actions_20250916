@@ -34,7 +34,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # 1) 対象コミットの決定
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             VERSION="${{ inputs.version || '' }}"
             TARGET_SHA_INPUT="${{ inputs.sha || '' }}"
@@ -43,7 +42,6 @@ jobs:
               exit 1
             fi
             if [ -z "$TARGET_SHA_INPUT" ]; then
-              # production 先頭をデフォルトに
               TARGET_SHA="$(git rev-parse origin/production)"
             else
               TARGET_SHA="$TARGET_SHA_INPUT"
@@ -56,21 +54,22 @@ jobs:
               echo "::error title=Invalid PR title::Expected vMAJOR.MINOR.PATCH#ticket, got: $TITLE"
               exit 1
             fi
+            # GitHub が提供するマージコミットの SHA（squash の場合もこの時点の production 先頭に近い）
             TARGET_SHA="${{ github.event.pull_request.merge_commit_sha }}"
+            if [ -z "$TARGET_SHA" ]; then
+              # 念のためのフォールバック
+              TARGET_SHA="$(git rev-parse origin/production)"
+            fi
           fi
 
-          # 2) タグ名生成（vX.Y.Z-YYYYMMDD-abcdefg）
           SHORT_SHA="$(echo "$TARGET_SHA" | cut -c1-7)"
           TAG="${VERSION}-$(TZ=Asia/Tokyo date +%Y%m%d)-${SHORT_SHA}"
 
-          # 3) 後続ステップ用にエクスポート
           {
             echo "TAG=$TAG"
             echo "TARGET_SHA=$TARGET_SHA"
           } >> "$GITHUB_ENV"
 
-          # 参考出力 & pipeline 連鎖用ファイル
-          echo "$TAG" > release-tag.txt
           echo "VERSION=$VERSION"
           echo "TARGET_SHA=$TARGET_SHA"
           echo "TAG=$TAG"
@@ -79,11 +78,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # 手元に無ければ、必要な対象コミットだけ取得（浅いfetchではない）
           if ! git cat-file -e "${TARGET_SHA}^{commit}" 2>/dev/null; then
             git fetch --no-tags origin "${TARGET_SHA}"
           fi
-          # 念のため再確認
           git cat-file -e "${TARGET_SHA}^{commit}"
 
       - name: Create and push tag
@@ -98,9 +95,3 @@ jobs:
 
           git tag -a "$TAG" -m "Tag $TAG from $TARGET_SHA" "$TARGET_SHA"
           git push origin "$TAG"
-
-      - name: Upload tag artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: created-tag
-          path: release-tag.txt
