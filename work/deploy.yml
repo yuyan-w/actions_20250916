@@ -1,4 +1,5 @@
 # .github/workflows/deploy.yml
+# OK
 name: Deploy on merge
 
 on:
@@ -35,10 +36,10 @@ jobs:
           fi
           echo "pr=$PR_NUMBER" >> "$GITHUB_OUTPUT"
 
-      - name: "Extract vX.Y.Z from PR title (format: v1.2.3#NNN)"
+      - name: "Extract vX.Y.Z from PR title (format: v1.2.3#NNN)" # ← name をクォート
         id: ver
         env:
-          PR: "${{ steps.pr.outputs.pr }}"
+          PR: "${{ steps.pr.outputs.pr }}" # ← 式は文字列としてクォート
           GH_TOKEN: "${{ github.token }}"
         run: |
           set -euo pipefail
@@ -79,7 +80,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Verify/create tag idempotently
+      - name: Verify tag uniqueness and create tag
         env:
           TAG: ${{ needs.resolve-version.outputs.tag_name }}
         run: |
@@ -88,23 +89,15 @@ jobs:
             echo "::error::Empty TAG from needs.resolve-version.outputs.tag_name"
             exit 1
           fi
-
           git fetch --tags
-
           if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
-            EXISTING_SHA="$(git rev-list -n1 "$TAG")"
-            if [ "$EXISTING_SHA" = "$GITHUB_SHA" ]; then
-              echo "::notice title=Tag exists::Tag $TAG already points to $GITHUB_SHA. Skipping creation."
-            else
-              echo "::error title=Tag collision::Tag $TAG exists on $EXISTING_SHA but expected $GITHUB_SHA"
-              exit 1
-            fi
-          else
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git tag -a "$TAG" -m "Tag $TAG" "$GITHUB_SHA"
-            git push origin "$TAG"
+            echo "::error::Tag $TAG already exists"
+            exit 1
           fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "Tag $TAG" "${GITHUB_SHA}"
+          git push origin "$TAG"
 
       - name: Deploy using version
         env:
