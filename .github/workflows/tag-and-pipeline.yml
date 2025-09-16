@@ -1,4 +1,4 @@
-# .github/workflows/tag-and-pipeline.yml
+# .github/workflows/tag-on-merge.yml
 name: Tag on Merge (and Manual)
 
 on:
@@ -7,91 +7,67 @@ on:
     branches: [production]
   workflow_dispatch:
     inputs:
-      version:
-        description: "Version (e.g., v1.2.3)"
-        required: false
+      version: { description: "v1.2.3", required: false }
       sha:
-        description: "Commit SHA to tag (default: HEAD of production)"
-        required: false
+        {
+          description: "Commit SHA (default: origin/production)",
+          required: false,
+        }
 
 permissions:
   contents: write
 
 jobs:
-  create-tag:
+  tag:
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout production (full history)
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          ref: production
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0, ref: production }
 
-      - name: Compute TAG and TARGET_SHA
-        id: compute
+      - name: Compute TAG & TARGET_SHA
+        id: comp
         shell: bash
         run: |
           set -euo pipefail
-
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             VERSION="${{ inputs.version || '' }}"
-            TARGET_SHA_INPUT="${{ inputs.sha || '' }}"
-            if [ -z "$VERSION" ]; then
-              echo "::error title=Missing version::Provide inputs.version (e.g. v1.2.3)"
-              exit 1
-            fi
-            if [ -z "$TARGET_SHA_INPUT" ]; then
-              TARGET_SHA="$(git rev-parse origin/production)"
-            else
-              TARGET_SHA="$TARGET_SHA_INPUT"
-            fi
+            TARGET_SHA="${{ inputs.sha || '' }}"
+            [ -n "$VERSION" ] || { echo "::error title=Missing version::inputs.version required"; exit 1; }
+            [ -n "$TARGET_SHA" ] || TARGET_SHA="$(git rev-parse origin/production)"
           else
             TITLE="${{ github.event.pull_request.title }}"
-            if [[ "$TITLE" =~ ^(v[0-9]+\.[0-9]+\.[0-9]+)#.+$ ]]; then
-              VERSION="${BASH_REMATCH[1]}"
-            else
-              echo "::error title=Invalid PR title::Expected vMAJOR.MINOR.PATCH#ticket, got: $TITLE"
-              exit 1
-            fi
-            # GitHub が提供するマージコミットの SHA（squash の場合もこの時点の production 先頭に近い）
+            [[ "$TITLE" =~ ^(v[0-9]+\.[0-9]+\.[0-9]+)#.+$ ]] || { echo "::error::Title must be vX.Y.Z#ticket"; exit 1; }
+            VERSION="${BASH_REMATCH[1]}"
             TARGET_SHA="${{ github.event.pull_request.merge_commit_sha }}"
-            if [ -z "$TARGET_SHA" ]; then
-              # 念のためのフォールバック
-              TARGET_SHA="$(git rev-parse origin/production)"
-            fi
+            [ -n "$TARGET_SHA" ] || TARGET_SHA="$(git rev-parse origin/production)"
           fi
-
           SHORT_SHA="$(echo "$TARGET_SHA" | cut -c1-7)"
           TAG="${VERSION}-$(TZ=Asia/Tokyo date +%Y%m%d)-${SHORT_SHA}"
+          echo "TAG=$TAG" >> $GITHUB_ENV
+          echo "TARGET_SHA=$TARGET_SHA" >> $GITHUB_ENV
+          echo "Computed $TAG for $TARGET_SHA"
 
-          {
-            echo "TAG=$TAG"
-            echo "TARGET_SHA=$TARGET_SHA"
-          } >> "$GITHUB_ENV"
-
-          echo "VERSION=$VERSION"
-          echo "TARGET_SHA=$TARGET_SHA"
-          echo "TAG=$TAG"
-
-      - name: Ensure TARGET_SHA exists locally (fetch if missing)
+      - name: Ensure TARGET_SHA exists (fetch if missing)
         shell: bash
         run: |
           set -euo pipefail
-          if ! git cat-file -e "${TARGET_SHA}^{commit}" 2>/dev/null; then
-            git fetch --no-tags origin "${TARGET_SHA}"
-          fi
+          git cat-file -e "${TARGET_SHA}^{commit}" 2>/dev/null || git fetch --no-tags origin "${TARGET_SHA}"
           git cat-file -e "${TARGET_SHA}^{commit}"
 
       - name: Create and push tag
         shell: bash
         run: |
           set -euo pipefail
-          : "${TAG:?TAG is required}"
-          : "${TARGET_SHA:?TARGET_SHA is required}"
-
-          git config user.name "github-actions[bot]"
+          git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git tag -a "$TAG" -m "Tag $TAG from $TARGET_SHA" "$TARGET_SHA"
+          git tag -a "$TAG" -m "Tag $TAG" "$TARGET_SHA"
           git push origin "$TAG"
+
+      - name: Trigger Pipeline with tag (reliable chaining)
+        uses: peter-evans/workflow-dispatch@v3
+        with:
+          workflow: "Pipeline (tag or manual)" # ← 下のWFの name と一致させる
+          ref: production
+          inputs: |
+            tag=${{ env.TAG }}

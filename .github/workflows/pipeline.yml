@@ -1,16 +1,13 @@
 # .github/workflows/pipeline.yml
-name: Pipeline (via workflow_run / tag / manual)
+name: Pipeline (tag or manual)
 
 on:
-  workflow_run:
-    workflows: ["Tag on Merge (and Manual)"]
-    types: [completed]
   push:
-    tags: ["v*"]
+    tags: ["v*"] # 人手のタグpushにも対応（任意・保険）
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to use (e.g., v1.2.3-20250916-abcdefg)"
+        description: "Tag (e.g., v1.2.3-20250916-abcdefg)"
         required: false
 
 permissions:
@@ -20,77 +17,53 @@ env:
   RELEASE_BRANCH: production
 
 jobs:
-  show-tag:
-    if: >
-      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
-      || github.event_name == 'push'
-      || github.event_name == 'workflow_dispatch'
+  run:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout (full history)
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
 
-      - name: Resolve TAG and TARGET_SHA
-        id: det
+      - name: Resolve TAG
+        id: res
         shell: bash
         run: |
           set -euo pipefail
-
-          TAG=""
-          EVENT="${{ github.event_name }}"
-
-          if [ "$EVENT" = "push" ] && [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+            [ -n "${TAG:-}" ] || { echo "::error title=No tag provided::Provide inputs.tag"; exit 1; }
+          else
             TAG="${GITHUB_REF#refs/tags/}"
-          elif [ "$EVENT" = "workflow_dispatch" ]; then
-            if [ -n "${{ inputs.tag }}" ]; then
-              TAG="${{ inputs.tag }}"
-            else
-              echo "::error title=No tag provided::Manual run requires 'inputs.tag'."
-              exit 1
-            fi
-          elif [ "$EVENT" = "workflow_run" ]; then
-            HEAD_SHA="${{ github.event.workflow_run.head_sha }}"
-            git fetch --tags --force
-            CANDIDATES="$(git tag --points-at "$HEAD_SHA" | tr -d '\r' || true)"
-            TAG="$(echo "$CANDIDATES" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+-[0-9]{8}-[0-9a-f]{7}$' | sort | tail -n1 || true)"
-            if [ -z "${TAG:-}" ]; then
-              echo "::error title=No matching tag on head_sha::No v*-YYYYMMDD-abcdefg7 tag found on ${HEAD_SHA}."
-              echo "Candidates were:"
-              echo "$CANDIDATES"
-              exit 1
-            fi
           fi
-
-          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-[0-9]{8}-[0-9a-f]{7}$ ]]; then
-            echo "::error title=Invalid tag format::Expected vMAJOR.MINOR.PATCH-YYYYMMDD-abcdefg7, got: $TAG"
-            exit 1
-          fi
-
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-[0-9]{8}-[0-9a-f]{7}$ ]] || {
+            echo "::error title=Invalid tag::Expected vX.Y.Z-YYYYMMDD-abcdefg7, got: $TAG"; exit 1; }
           TARGET_SHA="$(git rev-list -n1 "$TAG")"
-
-          {
-            echo "TAG=$TAG"
-            echo "TARGET_SHA=$TARGET_SHA"
-          } >> "$GITHUB_ENV"
-
-          echo "Resolved TAG=$TAG"
-          echo "TARGET_SHA=$TARGET_SHA"
+          echo "TAG=$TAG" >> $GITHUB_ENV
+          echo "TARGET_SHA=$TARGET_SHA" >> $GITHUB_ENV
 
       - name: Ensure tag commit is on ${{ env.RELEASE_BRANCH }}
         shell: bash
         run: |
           set -euo pipefail
           git fetch origin "${RELEASE_BRANCH}:${RELEASE_BRANCH}"
-          if git merge-base --is-ancestor "$TARGET_SHA" "$RELEASE_BRANCH"; then
-            echo "OK: $TAG points to a commit reachable from '${RELEASE_BRANCH}'."
+          git merge-base --is-ancestor "$TARGET_SHA" "$RELEASE_BRANCH" || {
+            echo "::error title=Tag not on branch::'$TAG' not reachable from '${RELEASE_BRANCH}'"; exit 1; }
+
+      - name: Extract version (vX.Y.Z) for app
+        id: ver
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$TAG" =~ ^(v[0-9]+\.[0-9]+\.[0-9]+)-[0-9]{8}-[0-9a-f]{7}$ ]]; then
+            VERSION="${BASH_REMATCH[1]}"
+            echo "VERSION=$VERSION" >> $GITHUB_ENV
+            echo "version=$VERSION"
           else
-            echo "::error title=Tag not on branch::'$TAG' (commit $TARGET_SHA) is not reachable from '${RELEASE_BRANCH}'."
-            exit 1
+            echo "::error title=Cannot parse version from tag::TAG=$TAG"; exit 1;
           fi
 
       - name: Print (behaviour check)
         shell: bash
         run: |
-          echo "Pipeline would run for tag: $TAG (commit: $TARGET_SHA) on branch: ${RELEASE_BRANCH}"
+          echo "Pipeline: TAG=$TAG, VERSION=$VERSION, SHA=$TARGET_SHA, BRANCH=${RELEASE_BRANCH}"
+          # ここで VERSION をアプリに渡す（例）
+          # echo "::set-output name=app_version::$VERSION"  # 推奨は $GITHUB_OUTPUT だが用途に応じて
