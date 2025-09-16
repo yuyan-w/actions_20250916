@@ -1,0 +1,82 @@
+# .github/workflows/tag-and-pipeline.yml
+name: Tag on Merge (and Manual)
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [production]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version (e.g., v1.2.3)"
+        required: true
+      sha:
+        description: "Commit SHA to tag (default: HEAD of production)"
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  create-tag:
+    if: github.event_name == 'workflow_dispatch' || (github.event.pull_request.merged == true)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: production
+
+      - name: Compute TAG from PR title or manual inputs
+        id: compute
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+            TARGET_SHA="${{ inputs.sha }}"
+            if [ -z "${TARGET_SHA:-}" ]; then
+              TARGET_SHA="$(git rev-parse origin/production)"
+            fi
+          else
+            TITLE="${{ github.event.pull_request.title }}"
+            if [[ "$TITLE" =~ ^(v[0-9]+\.[0-9]+\.[0-9]+)#.+$ ]]; then
+              VERSION="${BASH_REMATCH[1]}"
+            else
+              echo "::error::PR title must include version like v1.2.3#xxx"
+              exit 1
+            fi
+            TARGET_SHA="${{ github.event.pull_request.merge_commit_sha }}"
+          fi
+
+          SHORT_SHA="$(echo "$TARGET_SHA" | cut -c1-7)"
+          # Use Tokyo local date as requested style (YYYYMMDD)
+          TAG="${VERSION}-$(TZ=Asia/Tokyo date +%Y%m%d)-${SHORT_SHA}"
+
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "TARGET_SHA=$TARGET_SHA" >> "$GITHUB_ENV"
+          echo "SHORT_SHA=$SHORT_SHA" >> "$GITHUB_ENV"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "target_sha=$TARGET_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Create and push tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Create annotated tag on the target merge commit
+          git tag -a "$TAG" -m "Tag $TAG from $TARGET_SHA" "$TARGET_SHA"
+          git push origin "$TAG"
+
+      - name: Simulate pipeline trigger (echo tag)
+        shell: bash
+        run: |
+          echo "Tag created: $TAG"
+          echo "Version: $VERSION"
+          echo "Target SHA: $TARGET_SHA"

@@ -1,0 +1,37 @@
+# .github/workflows/pipeline.yml
+name: Pipeline (on Tag or Manual)
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to use (e.g., v1.2.3-20250916-abcdef0)"
+        required: false
+
+jobs:
+  show-tag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine tag
+        id: det
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+            if [ -z "${TAG:-}" ]; then
+              echo "::error::Please provide the tag input for manual run."
+              exit 1
+            fi
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Print (behaviour check)
+        shell: bash
+        run: |
+          echo "Pipeline would run for tag: $TAG"

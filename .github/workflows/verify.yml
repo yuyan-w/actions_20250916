@@ -1,0 +1,22 @@
+# .github/workflows/pr-title-check.yml
+name: PR Title Check
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+    branches: [production]
+
+jobs:
+  validate-title:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate PR title matches vMAJOR.MINOR.PATCH#xxxx (e.g., v1.2.3#ABC-123)
+        shell: bash
+        run: |
+          TITLE="${{ github.event.pull_request.title }}"
+          if [[ "$TITLE" =~ ^v[0-9]+\.[0-9]+\.[0-9]+#.+$ ]]; then
+            echo "OK: $TITLE"
+          else
+            echo "::error title=Invalid PR title::Title must match vMAJOR.MINOR.PATCH#xxxx (e.g., v1.2.3#ABC-123)"
+            exit 1
+          fi
